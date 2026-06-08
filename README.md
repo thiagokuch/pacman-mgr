@@ -1,27 +1,28 @@
 # pacman-mgr 🚀
 
 A lightweight, interactive, and colorful custom CLI wrapper for Arch Linux that seamlessly bridges **pacman** and the **AUR (Arch User Repository)** without depending on third-party AUR helpers. It features native tab-completion support for both **Bash** and **Zsh**.
-
 ---
 
 ## 🌟 Features
 
 *   **Dual Mode Engine**: Works both as a single-line CLI command (e.g., `pacman-mgr install vlc`) and a text-based interactive menu.
+*   **Smart System Updates (`update`)**: Performs a full core system upgrade (`pacman -Syu`). If AUR packages are detected locally, it polls the official AUR RPC API to check for updates and offers a targeted, individual upgrade prompt for each outdated package.
 *   **Zero-Helper AUR Compilations**: Checks repositories automatically. Official packages are bundled into single `pacman -S` commands, while AUR packages are filtered, cloned via `git`, built via `makepkg`, and handled safely.
+*   **SUDO-Aware Security Engine**: Safely bypasses the `makepkg as root is not allowed` restriction. Even when running the script with administrative privileges (`sudo`), the AUR compilation process dynamically drops root permissions via `$SUDO_USER` to compile packages safely in a secure user-space environment.
 *   **Security Confirmations**: Explicitly prompts the user with warnings before building or modifying code coming from the AUR.
-*   **Real-time Native Logging**: Outputs operational statuses (`[SUCCESS]`, `[ERROR]`, `[SKIP]`) directly to the console in real-time, matching standard system package managers.
+*   **Real-time Native Logging**: Outputs operational statuses (`[SUCCESS]`, `[ERROR]`, `[SKIP]`, `[UPDATE_START]`) directly to the console in real-time, matching standard system package managers.
 *   **Smart Cache Cleanup**: Leverages `paccache` to prune old configurations safely while keeping recent versions for recovery. Falls back cleanly to `pacman -Sc` if system utilities are missing.
-*   **Full Tab-Completion**: Intuitively autofills subcommands on the system shell, and dynamically polls your internal database to autocomplete **only currently installed packages** when using removal or status utilities.
+*   **Full Tab-Completion**: Intuitively autofills subcommands (including the new `update`) on the system shell, and dynamically polls your internal database to autocomplete **only currently installed packages** when using removal or status utilities.
 
 ---
 
 ## 🎨 Interface & Logs Preview
 
 The script uses standard ANSI color coding to emphasize states and actions:
-*   `[INFO]` / `[PACMAN_START]`: Cyan markers for background workflows.
-*   `[SUCCESS]` / `[AUR_SUCCESS]`: Bold green output signals for successful operations.
-*   `[WARNING]`: Yellow prompts when checking unverified repositories.
-*   `[ERROR]`: Red output tags for invalid states, network errors, or cancelled builds.
+*   `[INFO]` / `[PACMAN_START]` / `[UPDATE_START]`: Cyan markers for background workflows.
+*   `[SUCCESS]` / `[AUR_SUCCESS]` / `[UPDATE_SUCCESS]`: Bold green output signals for successful operations.
+*   `[WARNING]` / `[AUR_CANCEL]`: Yellow prompts when checking unverified repositories or cancelling builds.
+*   `[ERROR]` / `[AUR_ERROR]` / `[UPDATE_ERROR]`: Red output tags for invalid states, network errors, or cancelled builds.
 
 ---
 
@@ -30,6 +31,9 @@ The script uses standard ANSI color coding to emphasize states and actions:
 ### Direct Command Line Interface (CLI Mode)
 
 ```bash
+# Upgrade system repositories and all installed AUR packages
+pacman-mgr update
+
 # Install a mix of Official and AUR packages
 pacman-mgr install vlc google-chrome
 
@@ -58,22 +62,20 @@ pacman-mgr
 ## 📦 Script Architecture Diagram
 
 ```text
-               [User Input: pacman-mgr install git spotify]
-
-
-                                    |
-                         ┌──────────┴──────────┐
-                         ▼                     ▼
-                 [Official Repo]             [AUR]
-                  (e.g., git)          (e.g., spotify)
-                         |                     |
-              Runs: sudo pacman -S      Prompts Warning 
-
-
-                         |             Clones git repository
-                         |              Compiles via makepkg
-                         ▼                     ▼
-                  [ System Installation via Pacman Backend ]
+                    [User Input: pacman-mgr update / install]
+                                        |
+                  ┌─────────────────────┴─────────────────────┐
+                  ▼                                           ▼
+          [Official Repo]                                   [AUR]
+      (Database sync / Core)                         (RPC API Lookup)
+                  |                                           |
+       Runs: sudo pacman -S/Syu                     Prompts Warning & Confirm
+                  |                                           |
+                  |                                 Drops root to $SUDO_USER
+                  |                                 Clones git repository
+                  |                                 Compiles via makepkg
+                  ▼                                           ▼
+         [ ────────────── System Installation via Pacman Backend ────────────── ]
 ```
 
 ---
