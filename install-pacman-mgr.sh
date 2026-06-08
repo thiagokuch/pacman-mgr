@@ -1,17 +1,13 @@
 #!/bin/bash
 # =====================================================================
-# PACMAN-MGR INSTALLER WITH ENGLISH SUBCOMMANDS & TAB-COMPLETION
+# PACMAN-MGR UNIVERSAL AUTOMATIC INSTALLER (UPDATED & FIXED)
 # =====================================================================
 
-echo "Installing pacman-mgr with English subcommands support..."
-echo "Creating the main script in /usr/local/bin/pacman-mgr"
-echo "Creating BASH completion for subcommands /usr/share/bash-completion/completions/pacman-mgr"
-echo "Creating ZSH completion for subcommands /usr/share/zsh/site-functions/_pacman-mgr"
-
-#!/bin/bash
-# =====================================================================
-# PACMAN-MGR UNIVERSAL AUTOMATIC INSTALLER
-# =====================================================================
+# Verificar se o script está sendo rodado como Root/Sudo para poder instalar nos diretórios do sistema
+if [ "$EUID" -ne 0 ]; then
+    echo "Por favor, execute este instalador como root ou usando sudo!"
+    exit 1
+fi
 
 echo "Installing/Updating the complete version of pacman-mgr..."
 
@@ -37,10 +33,10 @@ log_message() {
     local COLOR=$NC
 
     case $TYPE in
-        "SUCCESS"|"PACMAN_SUCCESS"|"AUR_SUCCESS") COLOR=$GREEN ;;
-        "ERROR"|"PACMAN_ERROR"|"AUR_ERROR")       COLOR=$RED ;;
-        "INFO"|"AUR_START"|"PACMAN_START")        COLOR=$CYAN ;;
-        "WARN"|"AUR_CANCEL"|"SKIP")               COLOR=$YELLOW ;;
+        "SUCCESS"|"PACMAN_SUCCESS"|"AUR_SUCCESS"|"UPDATE_SUCCESS") COLOR=$GREEN ;;
+        "ERROR"|"PACMAN_ERROR"|"AUR_ERROR"|"UPDATE_ERROR")       COLOR=$RED ;;
+        "INFO"|"AUR_START"|"PACMAN_START"|"UPDATE_START")         COLOR=$CYAN ;;
+        "WARN"|"AUR_CANCEL"|"SKIP")                               COLOR=$YELLOW ;;
     esac
 
     echo -e "${BOLD}[$TIMESTAMP]${NC} ${COLOR}${BOLD}[$TYPE]${NC} ${COLOR}$MESSAGE${NC}" >&2
@@ -54,6 +50,7 @@ show_help() {
     echo -e "${BOLD}USAGE:${NC}"
     echo -e "  pacman-mgr [command] [options/packages]\n"
     echo -e "${BOLD}COMMANDS:${NC}"
+    echo -e "  ${CYAN}update${NC}           Updates the system database and upgrades all packages (Repo + AUR)."
     echo -e "  ${CYAN}install${NC} [pkgs]   Installs packages from Official Repositories or AUR."
     echo -e "                  Multiple packages can be separated by spaces."
     echo -e "  ${CYAN}remove${NC}  [pkgs]   Safely removes packages and their orphaned dependencies."
@@ -76,14 +73,47 @@ update_db() {
     fi
 }
 
+# Function to update the system (Official Repos + AUR)
+update_system() {
+    log_message "UPDATE_START" "Starting full core system upgrade (pacman -Syu)..."
+    if sudo pacman -Syu; then
+        log_message "UPDATE_SUCCESS" "Official repositories system upgrade completed successfully."
+    else
+        log_message "UPDATE_ERROR" "Core system upgrade failed."
+        return 1
+    fi
+
+    # Verificar se existem pacotes do AUR (estrangeiros) instalados
+    local AUR_PKGS=$(pacman -Qm | awk '{print $1}')
+    if [ -n "$AUR_PKGS" ]; then
+        echo -e "\n${YELLOW}${BOLD}Checking for AUR package updates...${NC}"
+        for PKG in $AUR_PKGS; do
+            # Consulta a API oficial do AUR para ver a versão mais recente disponível
+            local REMOTE_VER=$(curl -s "https://aur.archlinux.org/rpc/?v=5&type=info&arg[]=${PKG}" | grep -oP '"Version":"\K[^"]+')
+            local LOCAL_VER=$(pacman -Qi "$PKG" | grep -i "Version" | awk -F': ' '{print $2}')
+
+            if [ -n "$REMOTE_VER" ] && [ "$REMOTE_VER" != "$LOCAL_VER" ]; then
+                echo -e "${CYAN}Update available for AUR package [${PKG}]: ${RED}${LOCAL_VER}${NC} -> ${GREEN}${REMOTE_VER}${NC}"
+                read -p "Do you want to upgrade ${PKG}? [y/N]: " CONFIRM_UP
+                if [[ "$CONFIRM_UP" =~ ^[Yy]$ ]]; then
+                    install_from_aur "$PKG"
+                else
+                    log_message "SKIP" "Skipping update for ${PKG}."
+                fi
+            fi
+        done
+        log_message "SUCCESS" "AUR packages check complete."
+    fi
+}
+
 # Function to clean pacman cache
 clean_cache() {
     log_message "INFO" "Starting system cache cleanup..."
     if command -v paccache &> /dev/null; then
         echo "Removing uninstalled packages from cache (keeping last 2 versions)..."
-        sudo status=0 paccache -r
+        sudo paccache -r
         echo "Removing all cached versions of uninstalled packages..."
-        sudo status=0 paccache -rk0
+        sudo paccache -rk0
         log_message "SUCCESS" "Package cache cleanup complete using paccache."
     else
         sudo pacman -Sc --noconfirm
@@ -104,7 +134,9 @@ install_from_aur() {
     local BUILD_DIR=$(mktemp -d)
     cd "$BUILD_DIR" || return 1
 
-    if git clone "https://archlinux.org{PKG}.git" &> /dev/null; then
+    # CORREÇÃO: Ajustado a URL do Git para apontar corretamente para o repositório AUR
+    log_message "INFO" "Cloning AUR repository for $PKG..."
+    if git clone "https://aur.archlinux.org/${PKG}.git" &> /dev/null; then
         cd "$PKG" || return 1
         log_message "AUR_START" "Starting compilation of AUR package: $PKG"
         if makepkg -si --noconfirm; then
@@ -221,7 +253,8 @@ check_pkg() {
                 echo -e "Note: Available to install from ${CYAN}Official Repositories${NC}."
             else
                 echo "Searching the AUR..."
-                if curl -s "https://archlinux.org[]=${PKG}" | grep -q '"resultcount":1'; then
+                # CORREÇÃO: Ajustada a URL da chamada RPC oficial da API do AUR
+                if curl -s "https://aur.archlinux.org/rpc/?v=5&type=info&arg[]=${PKG}" | grep -q '"resultcount":1'; then
                     echo -e "Note: Available to install via ${YELLOW}AUR${NC}."
                 else
                     echo -e "${RED}Error: Package not found in Official Repositories or AUR.${NC}"
@@ -236,6 +269,7 @@ if [ $# -gt 0 ]; then
     COMMAND=$1
     shift # Remove the first argument to leave only package names
     case $COMMAND in
+        update)           update_system ;;
         install)          install_pkg "$@" ;;
         remove)           remove_pkg "$@" ;;
         status)           check_pkg "$@" ;;
@@ -255,6 +289,7 @@ while true; do
     echo -e "\n${MAGENTA}=============================="
     echo -e " ${BOLD}Pacman + AUR Package Manager${NC} "
     echo -e "${MAGENTA}=============================="
+    echo -e "${CYAN}update${NC}  - Upgrade system & AUR local packages"
     echo -e "${CYAN}install${NC} - Install package(s) (Repo/AUR)"
     echo -e "${CYAN}remove${NC}  - Remove package(s)"
     echo -e "${CYAN}status${NC}  - Analyze package(s)"
@@ -264,13 +299,14 @@ while true; do
     read -p "Choose a command: " CHOICE
 
     case $CHOICE in
+        update)  update_system ;;
         install) install_pkg ;;
         remove)  remove_pkg ;;
         status)  check_pkg ;;
         clean)   clean_cache ;;
         help)    show_help ;;
         exit)    echo "Exiting."; exit 0 ;;
-        *)       echo -e "${RED}Invalid command. Please try: install, remove, status, clean, help, exit.${NC}" ;;
+        *)       echo -e "${RED}Invalid command. Please try: update, install, remove, status, clean, help, exit.${NC}" ;;
     esac
 done
 EOF
@@ -278,7 +314,7 @@ EOF
 # 2. CONCEDENDO PERMISSÕES DE EXECUÇÃO
 chmod +x /usr/local/bin/pacman-mgr
 
-# 3. CRIANDO AUTOCOMPLETAR PARA O BASH
+# 3. CRIANDO AUTOCOMPLETAR PARA O BASH (ATUALIZADO COM 'update')
 mkdir -p /usr/share/bash-completion/completions
 
 cat << 'EOF' > /usr/share/bash-completion/completions/pacman-mgr
@@ -287,7 +323,7 @@ _pacman_mgr_completion() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="install remove status clean help -h --help exit"
+    opts="update install remove status clean help -h --help exit"
 
     if [[ ${COMP_CWORD} -eq 1 ]]; then
         COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -299,12 +335,17 @@ _pacman_mgr_completion() {
             COMPREPLY=( $(compgen -W "$(pacman -Qq)" -- "${cur}") )
             return 0
             ;;
+        install)
+            # Autocompletar básico para pacotes do repositório oficial (opcional, mas ajuda)
+            COMPREPLY=( $(compgen -W "$(pacman -Ssq 2>/dev/null)" -- "${cur}") )
+            return 0
+            ;;
     esac
 }
 complete -F _pacman_mgr_completion pacman-mgr
 EOF
 
-# 4. CRIANDO AUTOCOMPLETAR PARA O ZSH
+# 4. CRIANDO AUTOCOMPLETAR PARA O ZSH (CORRIGIDO E ATUALIZADO COM 'update')
 mkdir -p /usr/share/zsh/site-functions
 
 cat << 'EOF' > /usr/share/zsh/site-functions/_pacman-mgr
@@ -315,19 +356,28 @@ _pacman-mgr() {
     typeset -A opt_args
 
     _arguments \
-        '1:Subcommand:(install remove status clean help -h --help exit)' \
+        '1:Subcommand:(update install remove status clean help -h --help exit)' \
         '*:Package:->_packages'
 
-    case $words in
-        remove|status)
-            _values 'installed packages' $(pacman -Qq)
+    case $state in
+        *)
+            case $words[2] in
+                remove|status)
+                    _values 'installed packages' $(pacman -Qq)
+                    ;;
+                install)
+                    # Evita travar o terminal listando dezenas de milhares de pacotes,
+                    # mas sugere pacotes caso comece a digitar
+                    _message 'Enter official or AUR package name'
+                    ;;
+            esac
             ;;
     esac
 }
+_pacman-mgr "$@"
 EOF
 
 echo "--------------------------------------------------"
 echo " Installation/Update Completed Successfully!"
 echo " Open a new terminal window to use: pacman-mgr"
 echo "--------------------------------------------------"
-
