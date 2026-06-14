@@ -1,17 +1,17 @@
 #!/bin/bash
 # =====================================================================
-# PACMAN-MGR UNIVERSAL AUTOMATIC INSTALLER (UPDATED & FIXED)
+# PACMAN-MGR UNIVERSAL AUTOMATIC INSTALLER (HARDENED SANDBOX EDITION)
 # =====================================================================
 
-# Verificar se o script está sendo rodado como Root/Sudo para poder instalar nos diretórios do sistema
+# Check if the script is running as Root/Sudo to allow installation in system directories
 if [ "$EUID" -ne 0 ]; then
-    echo "Por favor, execute este instalador como root ou usando sudo!"
+    echo "Please execute this installer as root or using sudo!"
     exit 1
 fi
 
-echo "Installing/Updating the complete version of pacman-mgr..."
+echo "Installing/Updating the secure version of pacman-mgr with Hardened Sandbox Traur auditing..."
 
-# 1. CRIANDO O SCRIPT PRINCIPAL EM /usr/local/bin/pacman-mgr
+# 1. CREATING THE MAIN CORE SCRIPT IN /usr/local/bin/pacman-mgr
 cat << 'EOF' > /usr/local/bin/pacman-mgr
 #!/bin/bash
 
@@ -34,7 +34,7 @@ log_message() {
 
     case $TYPE in
         "SUCCESS"|"PACMAN_SUCCESS"|"AUR_SUCCESS"|"UPDATE_SUCCESS") COLOR=$GREEN ;;
-        "ERROR"|"PACMAN_ERROR"|"AUR_ERROR"|"UPDATE_ERROR")       COLOR=$RED ;;
+        "ERROR"|"PACMAN_ERROR"|"AUR_ERROR"|"UPDATE_ERROR"|"SECURITY_BLOCK") COLOR=$RED ;;
         "INFO"|"AUR_START"|"PACMAN_START"|"UPDATE_START")         COLOR=$CYAN ;;
         "WARN"|"AUR_CANCEL"|"SKIP")                               COLOR=$YELLOW ;;
     esac
@@ -83,12 +83,10 @@ update_system() {
         return 1
     fi
 
-    # Verificar se existem pacotes do AUR (estrangeiros) instalados
     local AUR_PKGS=$(pacman -Qm | awk '{print $1}')
     if [ -n "$AUR_PKGS" ]; then
         echo -e "\n${YELLOW}${BOLD}Checking for AUR package updates...${NC}"
         for PKG in $AUR_PKGS; do
-            # Consulta a API oficial do AUR para ver a versão mais recente disponível
             local REMOTE_VER=$(curl -s "https://aur.archlinux.org/rpc/?v=5&type=info&arg[]=${PKG}" | grep -oP '"Version":"\K[^"]+')
             local LOCAL_VER=$(pacman -Qi "$PKG" | grep -i "Version" | awk -F': ' '{print $2}')
 
@@ -121,9 +119,67 @@ clean_cache() {
     fi
 }
 
-# Function to install AUR packages via makepkg/pacman
+# Function to securely build and install Traur directly from official GitHub
+bootstrap_traur() {
+    local REAL_USER=${SUDO_USER:-$USER}
+    log_message "INFO" "Bootstrapping 'traur' directly from official GitHub repository..."
+
+    if ! command -v cargo &> /dev/null; then
+        log_message "INFO" "Rust environment (cargo) missing. Installing default toolchain..."
+        sudo pacman -S rust --noconfirm
+    fi
+
+    local T_BUILD_DIR=$(mktemp -d)
+    chown -R "$REAL_USER":"$REAL_USER" "$T_BUILD_DIR"
+    cd "$T_BUILD_DIR" || return 1
+
+    if sudo -u "$REAL_USER" git clone "https://github.com/Sohimaster/traur" &> /dev/null; then
+        cd traur || return 1
+        log_message "INFO" "Compiling traur binary via cargo..."
+        if sudo -u "$REAL_USER" cargo build --release &> /dev/null; then
+            log_message "INFO" "Deploying traur system-wide..."
+            cp target/release/traur /usr/local/bin/traur
+            chmod +x /usr/local/bin/traur
+            log_message "SUCCESS" "'traur' security auditor successfully compiled and deployed."
+            cd ~ || return 1
+            rm -rf "$T_BUILD_DIR"
+            return 0
+        fi
+    fi
+
+    log_message "ERROR" "Failed to compile 'traur' from GitHub."
+    cd ~ || return 1
+    rm -rf "$T_BUILD_DIR"
+    return 1
+}
+
+# Function to install AUR packages via makepkg/pacman with Hardened Sandbox Traur Auditing
 install_from_aur() {
     local PKG=$1
+    local REAL_USER=${SUDO_USER:-$USER}
+
+    # 1. VERIFY AND BOOTSTRAP TRAUR SECURELY FROM GITHUB
+    if ! command -v traur &> /dev/null; then
+        echo -e "\n${YELLOW}${BOLD}🔍 DEPENDENCY INFO: 'traur' (AUR Auditor) is not installed.${NC}"
+        read -p "Do you want to securely compile 'traur' from GitHub to audit AUR packages? [Y/n]: " INSTALL_TRAUR
+        INSTALL_TRAUR=${INSTALL_TRAUR:-Y}
+
+        if [[ "$INSTALL_TRAUR" =~ ^[Yy]$ ]]; then
+            if ! bootstrap_traur; then
+                log_message "ERROR" "CRITICAL COMPLIANCE FAILURE: Failed to deploy secure dependency 'traur'. Aborting '$PKG' installation."
+                return 1
+            fi
+        else
+            log_message "WARN" "Proceeding without 'traur' is highly discouraged due to recent AUR exploits."
+            read -p "Are you absolutely sure you want to skip auditing for '$PKG'? [y/N]: " SKIP_CONFIRM
+            if [[ ! "$SKIP_CONFIRM" =~ ^[Yy]$ ]]; then
+                log_message "AUR_CANCEL" "Installation canceled by user."
+                return 1
+            fi
+        fi
+    fi
+
+    # 2. TARGET AUR PACKAGE INSTALLATION PROCESS
     echo -e "\n${RED}${BOLD}⚠️  WARNING: The package '$PKG' comes from the AUR (Arch User Repository).${NC}"
     read -p "Do you want to proceed with the AUR installation? [y/N]: " CONFIRM
     if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
@@ -132,14 +188,129 @@ install_from_aur() {
     fi
 
     local BUILD_DIR=$(mktemp -d)
+    chown -R "$REAL_USER":"$REAL_USER" "$BUILD_DIR"
     cd "$BUILD_DIR" || return 1
 
-    # CORREÇÃO: Ajustado a URL do Git para apontar corretamente para o repositório AUR
     log_message "INFO" "Cloning AUR repository for $PKG..."
-    if git clone "https://aur.archlinux.org/${PKG}.git" &> /dev/null; then
+    if sudo -u "$REAL_USER" git clone "https://aur.archlinux.org/${PKG}.git" &> /dev/null; then
         cd "$PKG" || return 1
+        chown -R "$REAL_USER":"$REAL_USER" "$BUILD_DIR/$PKG"
+
+        # 3. CODE AUDITING VIA HARDENED SYSTEMD-RUN SANDBOX
+        if command -v traur &> /dev/null; then
+            echo -e "\n${MAGENTA}${BOLD}┌──────────────────────────────────────────────────────────┐${NC}"
+            echo -e "│         TRAUR SECURITY AUDIT REPORT (HARDENED SANDBOX)   │"
+            echo -e "└──────────────────────────────────────────────────────────┘${NC}"
+
+            local AUDIT_LOG=$(mktemp)
+            chown "$REAL_USER":"$REAL_USER" "$AUDIT_LOG"
+
+            # Executing traur under a transient systemd sandbox with custom strict policies
+            systemd-run --user --wait --pipe \
+                --property=PrivateNetwork=true \
+                --property=ProtectSystem=strict \
+                --property=ProtectHome=true \
+                --property=NoNewPrivileges=true \
+                --property=CapabilityBoundingSet="" \
+                --property=RestrictNamespaces=true \
+                --property=BindPaths="$BUILD_DIR/$PKG" \
+                /usr/local/bin/traur PKGBUILD 2>/dev/null | tee "$AUDIT_LOG"
+
+            echo -e "${MAGENTA}${BOLD}┌──────────────────────────────────────────────────────────┐${NC}"
+            echo -e "│                       END OF REPORT                      │"
+            echo -e "└──────────────────────────────────────────────────────────┘${NC}"
+
+            local CLASSIFICATION="UNKNOWN"
+            if grep -iq "MALICIOUS" "$AUDIT_LOG"; then CLASSIFICATION="MALICIOUS"
+            elif grep -iq "DANGEROUS" "$AUDIT_LOG"; then CLASSIFICATION="DANGEROUS"
+            elif grep -iq "SUSPICIOUS" "$AUDIT_LOG"; then CLASSIFICATION="SUSPICIOUS"
+            elif grep -iq "REVIEW" "$AUDIT_LOG"; then CLASSIFICATION="REVIEW"
+            elif grep -iq "OK" "$AUDIT_LOG"; then CLASSIFICATION="OK"
+            elif grep -iq "SAFE" "$AUDIT_LOG"; then CLASSIFICATION="SAFE"
+            fi
+
+            rm -f "$AUDIT_LOG"
+
+            # Render Dynamic Assessment Banner
+            echo -e "\n${BOLD}📊 AUDIT ASSESSMENT RESULTS:${NC}"
+            case "$CLASSIFICATION" in
+                "SAFE")
+                    echo -e "${GREEN}${BOLD}==================================================${NC}"
+                    echo -e "${GREEN}${BOLD}🛡️  TRUST LEVEL: SAFE (90-100)                      ${NC}"
+                    echo -e "${GREEN}No unusual behavior or dangerous commands found.  ${NC}"
+                    echo -e "${GREEN}${BOLD}==================================================${NC}"
+                    ;;
+                "OK")
+                    echo -e "${GREEN}${BOLD}==================================================${NC}"
+                    echo -e "${GREEN}${BOLD}✅ TRUST LEVEL: OK (75-89)                        ${NC}"
+                    echo -e "${GREEN}Normal package complexity. Review is optional.    ${NC}"
+                    echo -e "${GREEN}${BOLD}==================================================${NC}"
+                    ;;
+                "REVIEW")
+                    echo -e "${YELLOW}${BOLD}==================================================${NC}"
+                    echo -e "${YELLOW}${BOLD}⚠️  TRUST LEVEL: REVIEW (60-74)                    ${NC}"
+                    echo -e "${YELLOW}Some flags detected. Inspection is recommended.  ${NC}"
+                    echo -e "${YELLOW}${BOLD}==================================================${NC}"
+                    ;;
+                "SUSPICIOUS")
+                    echo -e "${YELLOW}${BOLD}==================================================${NC}"
+                    echo -e "${YELLOW}${BOLD}⚡ TRUST LEVEL: SUSPICIOUS (40-59)                ${NC}"
+                    echo -e "${YELLOW}Multiple suspicious indicators found. Be careful! ${NC}"
+                    echo -e "${YELLOW}${BOLD}==================================================${NC}"
+                    ;;
+                "DANGEROUS")
+                    echo -e "${RED}${BOLD}==================================================${NC}"
+                    echo -e "${RED}${BOLD}🚨 TRUST LEVEL: DANGEROUS (20-39)                 ${NC}"
+                    echo -e "${RED}High risk variables or dangerous actions found.    ${NC}"
+                    echo -e "${RED}${BOLD}==================================================${NC}"
+                    ;;
+                "MALICIOUS")
+                    echo -e "${RED}${BOLD}==================================================${NC}"
+                    echo -e "${RED}${BOLD}❌ TRUST LEVEL: MALICIOUS (0-19)                  ${NC}"
+                    echo -e "${RED}CRITICAL SECURITY PATTERNS DETECTED!              ${NC}"
+                    echo -e "${RED}${BOLD}==================================================${NC}"
+                    ;;
+                *)
+                    echo -e "${RED}${BOLD}==================================================${NC}"
+                    echo -e "${RED}${BOLD}❓ TRUST LEVEL: UNKNOWN / INVALID SCORE           ${NC}"
+                    echo -e "${RED}Security risk: traur output signature is missing.  ${NC}"
+                    echo -e "${RED}${BOLD}==================================================${NC}"
+                    ;;
+            esac
+
+            # AUTOMATIC POLICY ENFORCEMENT HALT
+            if [ "$CLASSIFICATION" = "DANGEROUS" ] || [ "$CLASSIFICATION" = "MALICIOUS" ] || [ "$CLASSIFICATION" = "UNKNOWN" ]; then
+                echo -e "\n${RED}${BOLD}╔═════════════════════════════════════════════════════════════════════════╗${NC}"
+                echo -e "║ 🛑 SECURITY ALERT: INSTALLATION HARD-BLOCKED                            ║"
+                echo -e "╚═════════════════════════════════════════════════════════════════════════╝${NC}"
+                if [ "$CLASSIFICATION" = "UNKNOWN" ]; then
+                    echo -e "${YELLOW}Reason: The package evaluation returned an [UNKNOWN] status.${NC}"
+                    echo -e "${YELLOW}This means 'traur' could not verify the PKGBUILD syntax safely, or the score is absent.${NC}"
+                else
+                    echo -e "${YELLOW}Reason: The package trust score is too low (${CLASSIFICATION}).${NC}"
+                fi
+                echo -e "${CYAN}Action: In accordance with our zero-trust policy, compilation has been stopped.${NC}"
+                echo -e "${CYAN}        All temporary build assets and git source trees have been erased.${NC}\n"
+
+                log_message "SECURITY_BLOCK" "Transaction terminated for '$PKG'. Execution halted."
+
+                cd ~ || return 1
+                rm -rf "$BUILD_DIR"
+                return 1
+            fi
+
+            read -p "Did you review the audit? Do you trust this package to proceed? [y/N]: " AUDIT_CONFIRM
+            if [[ ! "$AUDIT_CONFIRM" =~ ^[Yy]$ ]]; then
+                log_message "AUR_CANCEL" "Security alert: Package '$PKG' rejected by the user after audit."
+                cd ~ || return 1
+                rm -rf "$BUILD_DIR"
+                return 1
+            fi
+        fi
+
+        # 4. COMPILATION AND TARGET DEPLOYMENT
         log_message "AUR_START" "Starting compilation of AUR package: $PKG"
-        if makepkg -si --noconfirm; then
+        if sudo -u "$REAL_USER" makepkg -si --noconfirm; then
             log_message "AUR_SUCCESS" "Package '$PKG' successfully installed via AUR."
         else
             log_message "AUR_ERROR" "Failed to compile or install AUR package: $PKG"
@@ -147,6 +318,8 @@ install_from_aur() {
     else
         log_message "AUR_ERROR" "AUR repository not found for: $PKG"
     fi
+
+    # 5. ENVIRONMENT PURGE AND CLEANUP
     cd ~ || return 1
     rm -rf "$BUILD_DIR"
 }
@@ -195,17 +368,17 @@ install_pkg() {
     done
 }
 
-# Function to remove packages
+# Function to remove packages (Safely structured to ignore bind warnings)
 remove_pkg() {
     local PACKAGES=("$@")
     if [ ${#PACKAGES[@]} -eq 0 ]; then
-        if [ -n "$BASH_VERSION" ]; then
-            bind 'set disable-completion off'
-            bind 'TAB: menu-complete'
-            complete -W "$(pacman -Qq)" read
+        if [ -n "$BASH_VERSION" ] && [[ $- == *i* ]]; then
+            bind 'set disable-completion off' 2>/dev/null
+            bind 'TAB: menu-complete' 2>/dev/null
+            complete -W "$(pacman -Qq)" read 2>/dev/null
         fi
         read -e -p "Enter package name(s) to remove (separated by spaces): " -a PACKAGES
-        if [ -n "$BASH_VERSION" ]; then complete -r read; fi
+        if [ -n "$BASH_VERSION" ] && [[ $- == *i* ]]; then complete -r read 2>/dev/null; fi
     fi
     if [ ${#PACKAGES[@]} -eq 0 ]; then return; fi
 
@@ -228,17 +401,17 @@ remove_pkg() {
     fi
 }
 
-# Function to analyze packages
+# Function to analyze packages (Safely structured to ignore bind warnings)
 check_pkg() {
     local PACKAGES=("$@")
     if [ ${#PACKAGES[@]} -eq 0 ]; then
-        if [ -n "$BASH_VERSION" ]; then
-            bind 'set disable-completion off'
-            bind 'TAB: menu-complete'
-            complete -W "$(pacman -Qq)" read
+        if [ -n "$BASH_VERSION" ] && [[ $- == *i* ]]; then
+            bind 'set disable-completion off' 2>/dev/null
+            bind 'TAB: menu-complete' 2>/dev/null
+            complete -W "$(pacman -Qq)" read 2>/dev/null
         fi
         read -e -p "Enter package name(s) to analyze (separated by spaces): " -a PACKAGES
-        if [ -n "$BASH_VERSION" ]; then complete -r read; fi
+        if [ -n "$BASH_VERSION" ] && [[ $- == *i* ]]; then complete -r read 2>/dev/null; fi
     fi
     if [ ${#PACKAGES[@]} -eq 0 ]; then return; fi
 
@@ -253,7 +426,6 @@ check_pkg() {
                 echo -e "Note: Available to install from ${CYAN}Official Repositories${NC}."
             else
                 echo "Searching the AUR..."
-                # CORREÇÃO: Ajustada a URL da chamada RPC oficial da API do AUR
                 if curl -s "https://aur.archlinux.org/rpc/?v=5&type=info&arg[]=${PKG}" | grep -q '"resultcount":1'; then
                     echo -e "Note: Available to install via ${YELLOW}AUR${NC}."
                 else
@@ -264,10 +436,10 @@ check_pkg() {
     done
 }
 
-# Check if arguments were passed directly on execution (CLI mode)
+# Core Parser Logic for Direct CLI Invocation
 if [ $# -gt 0 ]; then
     COMMAND=$1
-    shift # Remove the first argument to leave only package names
+    shift
     case $COMMAND in
         update)           update_system ;;
         install)          install_pkg "$@" ;;
@@ -284,7 +456,7 @@ if [ $# -gt 0 ]; then
     exit 0
 fi
 
-# Main Menu Loop (Interactive mode)
+# Text-Based Interactive Dashboard (Main Loop)
 while true; do
     echo -e "\n${MAGENTA}=============================="
     echo -e " ${BOLD}Pacman + AUR Package Manager${NC} "
@@ -311,10 +483,10 @@ while true; do
 done
 EOF
 
-# 2. CONCEDENDO PERMISSÕES DE EXECUÇÃO
+# 2. GRANTING DIRECTORY EXECUTION PRIVILEGES
 chmod +x /usr/local/bin/pacman-mgr
 
-# 3. CRIANDO AUTOCOMPLETAR PARA O BASH (ATUALIZADO COM 'update')
+# 3. GENERATING SYSTEM-WIDE BASH TAB-COMPLETION RULES
 mkdir -p /usr/share/bash-completion/completions
 
 cat << 'EOF' > /usr/share/bash-completion/completions/pacman-mgr
@@ -336,7 +508,6 @@ _pacman_mgr_completion() {
             return 0
             ;;
         install)
-            # Autocompletar básico para pacotes do repositório oficial (opcional, mas ajuda)
             COMPREPLY=( $(compgen -W "$(pacman -Ssq 2>/dev/null)" -- "${cur}") )
             return 0
             ;;
@@ -345,7 +516,7 @@ _pacman_mgr_completion() {
 complete -F _pacman_mgr_completion pacman-mgr
 EOF
 
-# 4. CRIANDO AUTOCOMPLETAR PARA O ZSH (CORRIGIDO E ATUALIZADO COM 'update')
+# 4. GENERATING NATIVE ZSH TAB-COMPLETION RULES
 mkdir -p /usr/share/zsh/site-functions
 
 cat << 'EOF' > /usr/share/zsh/site-functions/_pacman-mgr
@@ -366,8 +537,6 @@ _pacman-mgr() {
                     _values 'installed packages' $(pacman -Qq)
                     ;;
                 install)
-                    # Evita travar o terminal listando dezenas de milhares de pacotes,
-                    # mas sugere pacotes caso comece a digitar
                     _message 'Enter official or AUR package name'
                     ;;
             esac
@@ -378,6 +547,6 @@ _pacman-mgr "$@"
 EOF
 
 echo "--------------------------------------------------"
-echo " Installation/Update Completed Successfully!"
+echo " Hardened Installation Completed Successfully!"
 echo " Open a new terminal window to use: pacman-mgr"
 echo "--------------------------------------------------"
